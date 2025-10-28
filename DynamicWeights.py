@@ -9,11 +9,12 @@ from torchinfo import summary
 import time
 from torch.utils.data import Dataset
 import numpy as np
-import numpy as np
-import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import gaussian_kde
-import torch
+from sklearn.decomposition import PCA
+from matplotlib.patches import Ellipse
+from matplotlib.colors import to_rgb, to_hex, LinearSegmentedColormap
+import matplotlib.patches as mpatches
 
 
 class IndexedDataset(Dataset):
@@ -239,8 +240,6 @@ plt.grid(True)
 plt.show()
 
 
-from sklearn.decomposition import PCA
-
 # --- collect all outputs across labels to fit PCA ---
 all_outputs = np.concatenate(
     [data["avg_outputs"] for data in smoothed.values()],
@@ -338,4 +337,121 @@ plt.xlabel("Predicted probability")
 plt.ylabel("Training time (binned)")
 plt.yticks([])
 plt.tight_layout()
+plt.show()
+
+
+
+# ------------------ color setup ------------------
+def lighten_color(color, amount=0.7):
+    """Return a lighter version of the given color (mix with white)."""
+    r, g, b = to_rgb(color)
+    r = 1 - (1 - r) * (1 - amount)
+    g = 1 - (1 - g) * (1 - amount)
+    b = 1 - (1 - b) * (1 - amount)
+    return to_hex((r, g, b))
+
+target_colors = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+]
+
+cmaps = []
+for c in target_colors:
+    light = lighten_color(c, amount=0.5)
+    cmap = LinearSegmentedColormap.from_list(f"{c}_fade", [light, c], N=256)
+    cmaps.append(cmap)
+
+# ------------------ ellipse helper ------------------
+def plot_cov_ellipse(mean, cov, ax, color, n_std=1, face_alpha=0.01, edge_alpha=1.0):
+    """Draw an ellipse with faint fill but solid outline."""
+    vals, vecs = np.linalg.eigh(cov)
+    order = vals.argsort()[::-1]
+    vals, vecs = vals[order], vecs[:, order]
+    theta = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
+    width, height = 2 * n_std * np.sqrt(vals)
+    
+    ell = Ellipse(
+        xy=mean,
+        width=width,
+        height=height,
+        angle=theta,
+        facecolor=color,
+        edgecolor="black",
+        lw=1.5,
+        alpha=face_alpha
+    )
+    r, g, b, _ = ell.get_edgecolor()
+    ell.set_edgecolor((r, g, b, edge_alpha))
+    ax.add_patch(ell)
+
+# ------------------ parameters ------------------
+sets = [0,1,2,3,4,5,6,7,8,9]
+k = 50
+label_names = {
+    0: "plane", 1: "car", 2: "bird", 3: "cat", 4: "deer",
+    5: "dog", 6: "frog", 7: "horse", 8: "ship", 9: "truck"
+}
+
+# ------------------ PCA projection ------------------
+# collect all outputs across all categories
+all_outputs = []
+for lbl in range(10):
+    entries = sorted(groups[lbl], key=lambda e: e["timestamp"])
+    if entries:
+        all_outputs.append(np.array([e["output"] for e in entries]))
+if not all_outputs:
+    raise ValueError("No outputs found in groups.")
+all_outputs = np.vstack(all_outputs)
+
+# fit PCA on the full output space
+pca = PCA(n_components=2)
+pca.fit(all_outputs)
+
+# ------------------ plotting ------------------
+
+def plot_category(target_label, cmap):
+    entries = sorted(groups[target_label], key=lambda e: e["timestamp"])
+    if not entries:
+        return
+    outputs = np.array([e["output"] for e in entries])
+    # project onto first 2 principal components
+    points = pca.transform(outputs)
+
+    n = len(points)
+    if n < k:
+        return
+    block_size = n // k
+    blocks = [points[i*block_size:(i+1)*block_size] for i in range(k)]
+    if n % k != 0:
+        blocks[-1] = np.vstack((blocks[-1], points[k*block_size:]))
+
+    colors = plt.cm.get_cmap(cmap)(np.linspace(0, 1, k))
+    for i, seg in enumerate(blocks):
+        if len(seg) < 3:
+            continue
+        mean = seg.mean(axis=0)
+        cov = np.cov(seg, rowvar=False)
+        plot_cov_ellipse(mean, cov, ax, color=colors[i], face_alpha=0.08, edge_alpha=1.0)
+
+
+fig, ax = plt.subplots(figsize=(8,8))
+ax.set_aspect("equal", "box")
+
+# plot selected categories
+for lbl, cmap in zip(sets, [cmaps[i] for i in sets]):
+    plot_category(lbl, cmap)
+
+# build legend with solid-color patches
+handles = [
+    mpatches.Patch(color=cmaps[i](1.0), label=label_names[i])
+    for i in sets
+]
+
+ax.legend(handles=handles, loc="upper right", fontsize=8, ncol=2, title="Categories")
+ax.set_xlabel("Principal component 1")
+ax.set_ylabel("Principal component 2")
+ax.set_xlim(-7.5, 10)
+ax.set_ylim(-5, 5)
+ax.set_aspect("equal", "box")
+ax.set_title("Ellipsoid evolution (first two PCA components)")
 plt.show()
